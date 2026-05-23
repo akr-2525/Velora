@@ -9,3 +9,5 @@ numpy
 streamlit
 sqlalchemy 
 psycopg2-binary
+pydantic
+email-validator
