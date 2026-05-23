@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+requests
+python-dotenv
+transformers
+torch
+sentencepiece
+numpy
+streamlit
+sqlalchemy 
+psycopg2-binary
