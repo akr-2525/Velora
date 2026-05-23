@@ -1,15 +1,81 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
+from apscheduler.schedulers.background import BackgroundScheduler
+from contextlib import asynccontextmanager
 
-from backend.services.news_service import get_top_headlines
-from backend.services.summarizer_service import summarize_text
+# Import your database and models
 from backend.db.database import engine, SessionLocal
 from backend.models.user_model import User
-from backend.models.schemas import UserCreate, UserResponse # Import your new schema
+from backend.models.schemas import UserCreate, UserResponse 
 
-app = FastAPI()
+# Import your core services
+from backend.services.news_service import get_top_headlines
+from backend.services.summarizer_service import summarize_text
+from backend.services.email_service import send_daily_digest
 
-# Create tables
+# --- 1. THE MASTER PIPELINE (SCHEDULER LOGIC) ---
+def run_daily_digest():
+    print("🚀 [SCHEDULER] Starting the automated daily digest pipeline...")
+    
+    # Open a fresh database connection for the background task
+    db = SessionLocal()
+    try:
+        # Get every registered user from the database
+        users = db.query(User).all()
+        
+        if not users:
+            print("No users found in the database. Skipping.")
+            return
+
+        for user in users:
+            print(f"🗞️ Fetching news for {user.name} (Interests: {user.interests})...")
+            
+            # Fetch raw articles based on their specific interests
+            raw_articles = get_top_headlines(user.interests)
+            
+            # Summarize each article using your AI transformer model
+            summarized_articles = []
+            for article in raw_articles:
+                description = article.get("description") or ""
+                summary = summarize_text(description)
+                
+                summarized_articles.append({
+                    "title": article.get("title"),
+                    "summary": summary,
+                    "url": article.get("url")
+                })
+            
+            # Dispatch the final email
+            print(f"📧 Sending email to {user.email}...")
+            send_daily_digest(user.email, user.name, summarized_articles)
+            
+        print("✅ [SCHEDULER] Daily digest pipeline completed successfully!")
+            
+    except Exception as e:
+        print(f"❌ [SCHEDULER] Pipeline error: {e}")
+    finally:
+        db.close() # Always close the connection to prevent memory leaks
+
+# --- 2. THE SCHEDULER LIFESPAN ---
+# This starts the clock when the server boots and stops it when the server shuts down
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = BackgroundScheduler()
+    
+    # FOR TESTING: Runs every 2 minutes so you can see it work immediately
+    scheduler.add_job(run_daily_digest, 'interval', minutes=1)
+    
+    # FOR PRODUCTION (Later): Comment out the line above and uncomment this one for a daily 8 AM run
+    # scheduler.add_job(run_daily_digest, 'cron', hour=8, minute=0)
+    
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+# Initialize FastAPI with the lifespan scheduler
+app = FastAPI(lifespan=lifespan)
+
+# Create tables if they don't exist
 try:
     User.metadata.create_all(bind=engine)
 except Exception as e:
@@ -23,11 +89,12 @@ def get_db():
     finally:
         db.close()
 
+# --- 3. EXISTING API ENDPOINTS ---
+
 @app.get("/")
 def home():
     return {"message": "SmartBrief AI running"}
 
-# --- NEW: User Registration Endpoint ---
 @app.post("/users/", response_model=UserResponse)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
     # Check if user already exists
@@ -42,9 +109,9 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
-# --- EXISTING: News Endpoint ---
 @app.get("/news")
 def fetch_news(category: str = "sports"):
+    # This keeps your Streamlit "Live News" tab working independently of the emailer
     articles = get_top_headlines(category)
     summarized_articles = []
 

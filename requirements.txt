@@ -11,3 +11,5 @@ sqlalchemy
 psycopg2-binary
 pydantic
 email-validator
+feedparser
+apscheduler
