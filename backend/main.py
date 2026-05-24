@@ -1,7 +1,10 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
+from pydantic import BaseModel
+import jwt
 
 # Import your database and models
 from backend.db.database import engine, SessionLocal
@@ -13,75 +16,17 @@ from backend.services.news_service import get_top_headlines
 from backend.services.summarizer_service import summarize_text
 from backend.services.email_service import send_daily_digest
 
-# --- 1. THE MASTER PIPELINE (SCHEDULER LOGIC) ---
-def run_daily_digest():
-    print("🚀 [SCHEDULER] Starting the automated daily digest pipeline...")
-    
-    # Open a fresh database connection for the background task
-    db = SessionLocal()
-    try:
-        # Get every registered user from the database
-        users = db.query(User).all()
-        
-        if not users:
-            print("No users found in the database. Skipping.")
-            return
+# Import our new security tools
+from backend.services.auth_service import (
+    get_password_hash, verify_password, create_access_token, 
+    SECRET_KEY, ALGORITHM
+)
 
-        for user in users:
-            print(f"🗞️ Fetching news for {user.name} (Interests: {user.interests})...")
-            
-            # Fetch raw articles based on their specific interests
-            raw_articles = get_top_headlines(user.interests)
-            
-            # Summarize each article using your AI transformer model
-            summarized_articles = []
-            for article in raw_articles:
-                description = article.get("description") or ""
-                summary = summarize_text(description)
-                
-                summarized_articles.append({
-                    "title": article.get("title"),
-                    "summary": summary,
-                    "url": article.get("url")
-                })
-            
-            # Dispatch the final email
-            print(f"📧 Sending email to {user.email}...")
-            send_daily_digest(user.email, user.name, summarized_articles)
-            
-        print("✅ [SCHEDULER] Daily digest pipeline completed successfully!")
-            
-    except Exception as e:
-        print(f"❌ [SCHEDULER] Pipeline error: {e}")
-    finally:
-        db.close() # Always close the connection to prevent memory leaks
-
-# --- 2. THE SCHEDULER LIFESPAN ---
-# This starts the clock when the server boots and stops it when the server shuts down
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    scheduler = BackgroundScheduler()
-    
-    # FOR TESTING: Runs every 2 minutes so you can see it work immediately
-    scheduler.add_job(run_daily_digest, 'interval', hours=24)
-    
-    # FOR PRODUCTION (Later): Comment out the line above and uncomment this one for a daily 8 AM run
-    # scheduler.add_job(run_daily_digest, 'cron', hour=8, minute=0)
-    
-    scheduler.start()
-    yield
-    scheduler.shutdown()
-
-# Initialize FastAPI with the lifespan scheduler
-app = FastAPI(lifespan=lifespan)
-
-# Create tables if they don't exist
 try:
     User.metadata.create_all(bind=engine)
 except Exception as e:
     print("DB connection failed:", e)
 
-# Dependency to get the database session
 def get_db():
     db = SessionLocal()
     try:
@@ -89,77 +34,137 @@ def get_db():
     finally:
         db.close()
 
-# --- 3. EXISTING API ENDPOINTS ---
+# --- SECURITY DEPENDENCY ---
+# This tells FastAPI where the frontend will send login credentials
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    # 1. The server intercepts the JWT token and attempts to decode it using the SECRET_KEY
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # 2. If the token is mathematically valid, fetch the user from the database
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+# --- SCHEDULER LOGIC ---
+def run_daily_digest():
+    print("🚀 [SCHEDULER] Starting the automated daily digest pipeline...")
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        if not users:
+            return
+
+        for user in users:
+            print(f"🗞️ Fetching news for {user.name}...")
+            raw_articles = get_top_headlines(user.interests)
+            summarized_articles = []
+            
+            for article in raw_articles:
+                description = article.get("description") or ""
+                summary = summarize_text(description)
+                summarized_articles.append({
+                    "title": article.get("title"),
+                    "summary": summary,
+                    "url": article.get("url")
+                })
+            
+            send_daily_digest(user.email, user.name, summarized_articles)
+        print("✅ [SCHEDULER] Daily digest pipeline completed successfully!")
+            
+    except Exception as e:
+        print(f"❌ [SCHEDULER] Pipeline error: {e}")
+    finally:
+        db.close()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(run_daily_digest, 'interval', minutes=2)
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
+
+
+# --- NEW: LOGIN ENDPOINT ---
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+@app.post("/login")
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    # Find user
+    user = db.query(User).filter(User.email == req.email).first()
+    
+    # Verify math (hash matching)
+    if not user or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    
+    # Generate the VIP Badge (JWT)
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer", "user": {"name": user.name, "interests": user.interests, "email": user.email}}
+
+# --- EXISTING/UPDATED ENDPOINTS ---
 @app.get("/")
 def home():
     return {"message": "SmartBrief AI running"}
 
 @app.post("/users/", response_model=UserResponse)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    # Check if user already exists
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Create new user
-    new_user = User(name=user.name, email=user.email, interests=user.interests)
+    # Hash the password BEFORE saving it to the database
+    hashed_pw = get_password_hash(user.password)
+    
+    new_user = User(
+        name=user.name, 
+        email=user.email, 
+        interests=user.interests, 
+        hashed_password=hashed_pw
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
     return new_user
 
+# --- PROTECTED ENDPOINTS (Requires valid JWT to access) ---
+@app.put("/users/me", response_model=UserResponse)
+def update_user(user_update: UserUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Notice we don't ask for an email in the URL anymore. The identity is proven by the token.
+    current_user.interests = user_update.interests
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+@app.delete("/users/me")
+def delete_user(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db.delete(current_user)
+    db.commit()
+    return {"message": "User successfully unsubscribed"}
+
 @app.get("/news")
 def fetch_news(category: str = "sports"):
-    # This keeps your Streamlit "Live News" tab working independently of the emailer
     articles = get_top_headlines(category)
     summarized_articles = []
-
     for article in articles:
         description = article.get("description") or ""
         summary = summarize_text(description)
-
         summarized_articles.append({
             "title": article.get("title"),
             "summary": summary,
             "url": article.get("url")
         })
-
-    return {
-        "category": category,
-        "total_articles": len(summarized_articles),
-        "articles": summarized_articles
-    }
-    
-    
-# Read User Profile ---
-@app.get("/users/{email}", response_model=UserResponse)
-def get_user(email: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
-# Update User Interests ---
-@app.put("/users/{email}", response_model=UserResponse)
-def update_user(email: str, user_update: UserUpdate, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Update the database with the new interests
-    user.interests = user_update.interests
-    db.commit()
-    db.refresh(user)
-    return user
-
-# Delete/Unsubscribe User ---
-@app.delete("/users/{email}")
-def delete_user(email: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    db.delete(user)
-    db.commit()
-    return {"message": "User successfully unsubscribed"}
+    return {"category": category, "total_articles": len(summarized_articles), "articles": summarized_articles}

@@ -13,3 +13,6 @@ pydantic
 email-validator
 feedparser
 apscheduler
+passlib[bcrypt]
+bcrypt<4.0.0
+PyJWT

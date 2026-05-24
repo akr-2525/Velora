@@ -1,16 +1,18 @@
 from pydantic import BaseModel, EmailStr
 
-class UserCreate(BaseModel):
+class UserBase(BaseModel):
     name: str
     email: EmailStr
-    interests: str  # e.g., "technology, finance, ai"
+    interests: str
 
-class UserResponse(UserCreate):
+class UserCreate(UserBase):
+    password: str # <--- Require a password for registration
+
+class UserResponse(UserBase):
     id: int
-
+    # Notice we DO NOT put the password in the response. It stays hidden!
     class Config:
         from_attributes = True
-
 
 class UserUpdate(BaseModel):
     interests: str
