@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 # Import your database and models
 from backend.db.database import engine, SessionLocal
 from backend.models.user_model import User
-from backend.models.schemas import UserCreate, UserResponse 
+from backend.models.schemas import UserCreate, UserResponse, UserUpdate 
 
 # Import your core services
 from backend.services.news_service import get_top_headlines
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
     
     # FOR TESTING: Runs every 2 minutes so you can see it work immediately
-    scheduler.add_job(run_daily_digest, 'interval', minutes=1)
+    scheduler.add_job(run_daily_digest, 'interval', hours=24)
     
     # FOR PRODUCTION (Later): Comment out the line above and uncomment this one for a daily 8 AM run
     # scheduler.add_job(run_daily_digest, 'cron', hour=8, minute=0)
@@ -130,3 +130,36 @@ def fetch_news(category: str = "sports"):
         "total_articles": len(summarized_articles),
         "articles": summarized_articles
     }
+    
+    
+# Read User Profile ---
+@app.get("/users/{email}", response_model=UserResponse)
+def get_user(email: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+# Update User Interests ---
+@app.put("/users/{email}", response_model=UserResponse)
+def update_user(email: str, user_update: UserUpdate, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Update the database with the new interests
+    user.interests = user_update.interests
+    db.commit()
+    db.refresh(user)
+    return user
+
+# Delete/Unsubscribe User ---
+@app.delete("/users/{email}")
+def delete_user(email: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    db.delete(user)
+    db.commit()
+    return {"message": "User successfully unsubscribed"}

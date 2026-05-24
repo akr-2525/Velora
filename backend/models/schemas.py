@@ -10,3 +10,7 @@ class UserResponse(UserCreate):
 
     class Config:
         from_attributes = True
+
+
+class UserUpdate(BaseModel):
+    interests: str
