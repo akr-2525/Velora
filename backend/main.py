@@ -12,16 +12,16 @@ from backend.models.user_model import User
 from backend.models.schemas import UserCreate, UserResponse, UserUpdate 
 
 # Import your core services
-from backend.services.news_service import get_top_headlines
-from backend.services.summarizer_service import summarize_text
-from backend.services.email_service import send_daily_digest
+from backend.services.ai_coach_service import generate_daily_digest
+from backend.services.email_service import send_email
 
-# Import our new security tools
+# Import our security tools
 from backend.services.auth_service import (
     get_password_hash, verify_password, create_access_token, 
     SECRET_KEY, ALGORITHM
 )
 
+# Initialize the database tables
 try:
     User.metadata.create_all(bind=engine)
 except Exception as e:
@@ -56,38 +56,80 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 # --- SCHEDULER LOGIC ---
 def run_daily_digest():
-    print("🚀 [SCHEDULER] Starting the automated daily digest pipeline...")
+    print("🚀 [SCHEDULER] Starting the automated daily AI Coach pipeline...")
     db = SessionLocal()
     try:
         users = db.query(User).all()
-        if not users:
-            return
-
         for user in users:
-            print(f"🗞️ Fetching news for {user.name}...")
-            raw_articles = get_top_headlines(user.interests)
-            summarized_articles = []
+            print(f"🧠 Generating custom advice for {user.name}...")
             
-            for article in raw_articles:
-                description = article.get("description") or ""
-                summary = summarize_text(description)
-                summarized_articles.append({
-                    "title": article.get("title"),
-                    "summary": summary,
-                    "url": article.get("url")
-                })
+            # 1. Ask Gemini to generate the custom JSON
+            ai_advice = generate_daily_digest(user.name, user.interests)
             
-            send_daily_digest(user.email, user.name, summarized_articles)
-        print("✅ [SCHEDULER] Daily digest pipeline completed successfully!")
+            # 🚨 THE LOUD DEBUGGER
+            print(f"🚨 DEBUG TYPE: {type(ai_advice)}")
+            
+            # 🛡️ THE ARMOR PLATING: If it's a string, force it to be a dictionary!
+            if isinstance(ai_advice, str):
+                import json
+                try:
+                    print("⚠️ WARNING: It was a string! Converting to dictionary now...")
+                    ai_advice = json.loads(ai_advice)
+                except:
+                    print("❌ ERROR: String was corrupted. Using safe fallback dictionary.")
+                    ai_advice = {
+                        "tip": "Take a 5-minute walk away from your keyboard.",
+                        "habit_reminder": "Spend 10 minutes reviewing your core goals today.",
+                        "quote": "Consistency is what transforms average into excellence.",
+                        "author": "System Coach"
+                    }
+                    
+            # 2. Format it into a beautiful HTML email
+            html_content = f"""
+            <html>
+                <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+                    <h2 style="color: #2c3e50;">Good Morning, {user.name}! ☕</h2>
+                    <p>Here is your daily personalized coaching to help you master: <strong>{user.interests}</strong></p>
+                    
+                    <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #3498db; margin: 20px 0;">
+                        <h3 style="margin-top: 0; color: #2980b9;">💡 Today's Technical Tip</h3>
+                        <p>{ai_advice.get('tip', 'Keep pushing forward.')}</p>
+                    </div>
+                    
+                    <div style="background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0;">
+                        <h3 style="margin-top: 0; color: #856404;">🎯 Daily Micro-Habit</h3>
+                        <p>{ai_advice.get('habit_reminder', 'Stay consistent.')}</p>
+                    </div>
+                    
+                    <hr style="border: 0; border-top: 1px solid #eee; margin: 30px 0;">
+                    
+                    <blockquote style="font-style: italic; color: #7f8c8d; font-size: 1.1em; text-align: center;">
+                        "{ai_advice.get('quote', 'Never give up.')}" <br>
+                        <strong>- {ai_advice.get('author', 'Coach')}</strong>
+                    </blockquote>
+                </body>
+            </html>
+            """
+            
+            # 3. Send the email
+            try:
+                # We are directly passing the HTML string to your updated email_service.py
+                send_email(user.email, f"Your Daily AI Coach: {user.interests}", html_content)
+                print(f"✅ Email successfully sent to {user.email}")
+            except Exception as email_err:
+                print(f"❌ Could not send email. Error: {email_err}")
             
     except Exception as e:
-        print(f"❌ [SCHEDULER] Pipeline error: {e}")
+        print(f"❌ Scheduler Error: {e}")
     finally:
         db.close()
 
+# Start the background job when the server starts
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler()
+    # Currently set to run every 2 minutes for testing. 
+    # Change 'minutes=2' to 'hours=24' when you are done testing.
     scheduler.add_job(run_daily_digest, 'interval', minutes=2)
     scheduler.start()
     yield
@@ -95,30 +137,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-
-
-# --- NEW: LOGIN ENDPOINT ---
+# --- LOGIN ENDPOINT ---
 class LoginRequest(BaseModel):
     email: str
     password: str
 
 @app.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    # Find user
     user = db.query(User).filter(User.email == req.email).first()
-    
-    # Verify math (hash matching)
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     
-    # Generate the VIP Badge (JWT)
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer", "user": {"name": user.name, "interests": user.interests, "email": user.email}}
 
-# --- EXISTING/UPDATED ENDPOINTS ---
+# --- STANDARD ENDPOINTS ---
 @app.get("/")
 def home():
-    return {"message": "SmartBrief AI running"}
+    return {"message": "SmartBrief AI Coach running"}
 
 @app.post("/users/", response_model=UserResponse)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
@@ -126,7 +162,6 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Hash the password BEFORE saving it to the database
     hashed_pw = get_password_hash(user.password)
     
     new_user = User(
@@ -140,10 +175,9 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
-# --- PROTECTED ENDPOINTS (Requires valid JWT to access) ---
+# --- PROTECTED ENDPOINTS ---
 @app.put("/users/me", response_model=UserResponse)
 def update_user(user_update: UserUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Notice we don't ask for an email in the URL anymore. The identity is proven by the token.
     current_user.interests = user_update.interests
     db.commit()
     db.refresh(current_user)
@@ -155,16 +189,10 @@ def delete_user(current_user: User = Depends(get_current_user), db: Session = De
     db.commit()
     return {"message": "User successfully unsubscribed"}
 
-@app.get("/news")
-def fetch_news(category: str = "sports"):
-    articles = get_top_headlines(category)
-    summarized_articles = []
-    for article in articles:
-        description = article.get("description") or ""
-        summary = summarize_text(description)
-        summarized_articles.append({
-            "title": article.get("title"),
-            "summary": summary,
-            "url": article.get("url")
-        })
-    return {"category": category, "total_articles": len(summarized_articles), "articles": summarized_articles}
+# --- AI COACH ENDPOINT ---
+@app.get("/generate-digest")
+def get_daily_digest(goals: str, name: str = "User"):
+    digest = generate_daily_digest(name, goals)
+    if not digest:
+        raise HTTPException(status_code=500, detail="Failed to generate AI digest")
+    return digest
