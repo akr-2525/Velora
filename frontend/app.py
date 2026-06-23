@@ -224,13 +224,19 @@ def fmt_time(dt):
 def fmt_datetime(dt):
     return dt.strftime("%b %d, %I:%M %p")
 
+def _now_ist():
+    """Return current datetime in IST (UTC+5:30). Works correctly on both local and Render."""
+    from datetime import timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+    return datetime.datetime.now(IST).replace(tzinfo=None)  # naive IST datetime
+
 def _today_in_user_tz():
-    """Return today's local date."""
-    return datetime.date.today()
+    """Return today's date in IST."""
+    return _now_ist().date()
 
 def _hour_in_user_tz():
-    """Return current local hour."""
-    return datetime.datetime.now().hour
+    """Return current hour in IST."""
+    return _now_ist().hour
 
 def badge(status, ctype="planned"):
     if ctype == "retroactive":
@@ -302,7 +308,7 @@ def smart_default_start(target_date):
         "/commitments/daily",
         params={"date": target_date.isoformat()},
     )
-    now_local = datetime.datetime.now()
+    now_local = _now_ist()
 
     if commits:
         latest_end = None
@@ -698,7 +704,7 @@ def render_daily_protocol():
 
         with plan_tab:
             st.caption("Block focused time in advance. The AI tracks whether you show up.")
-            target_date = st.date_input("Date", value=datetime.date.today(),
+            target_date = st.date_input("Date", value=_today_in_user_tz(),
                                          key="plan_date")
             def_h, def_m = smart_default_start(target_date)
 
@@ -742,7 +748,7 @@ def render_daily_protocol():
                     # Backend stores naive values; we send naive; display is direct.
                     start_dt  = datetime.datetime.combine(today, start_time_obj)
                     end_dt    = start_dt + datetime.timedelta(minutes=int(duration))
-                    now_local = datetime.datetime.now()
+                    now_local = _now_ist()
 
                     if start_dt < (now_local - datetime.timedelta(minutes=5)):
                         st.error("Start time is in the past. Pick a future window.")
@@ -836,7 +842,7 @@ def render_daily_protocol():
                 "Plan a window on the left, or log work you already did.",
             )
         else:
-            now_local = datetime.datetime.now()
+            now_local = _now_ist()
 
             # Auto-refresh: if any commitment ends within the next hour,
             # show a refresh button so users don't have to manually reload.
@@ -1719,7 +1725,9 @@ if query_params.get("view") == "reflection" and "token" in query_params:
     render_reflection_deeplink()
 
 # Email deep-link: password reset (no auth needed)
-elif "token" in query_params and "view" not in query_params and "action" not in query_params:
+# Handles both /?token=xxx (old) and /?action=reset-password&token=xxx (new)
+elif (query_params.get("action") == "reset-password" and "token" in query_params) or \
+     ("token" in query_params and "view" not in query_params and "action" not in query_params):
     render_password_reset()
 
 # Email deep-link: unsubscribe
