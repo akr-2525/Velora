@@ -1,198 +1,576 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+"""
+Velora — Execution Intelligence Platform
+FastAPI application entry point.
+"""
+
+import json
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
-from contextlib import asynccontextmanager
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel
-import jwt
 
-# Import your database and models
+# Database
 from backend.db.database import engine, SessionLocal
-from backend.models.user_model import User
-from backend.models.schemas import UserCreate, UserResponse, UserUpdate 
+from backend.models.user_model import Base, User, DigestSentLog
+from backend.models.commitment_model import Commitment
 
-# Import your core services
-from backend.services.ai_coach_service import generate_daily_digest
+# Services
+from backend.services.ai_coach_service import PersonalizedDigestEngine
 from backend.services.email_service import send_email
-
-# Import our security tools
+from backend.services.scheduler_service import send_all_weekly_reports
 from backend.services.auth_service import (
-    get_password_hash, verify_password, create_access_token, 
-    SECRET_KEY, ALGORITHM
+    get_password_hash, verify_password, create_access_token
+)
+from backend.services.commitment_service import auto_finalize_expired_commitments
+
+# Dependencies
+from backend.dependencies import get_db, get_current_user
+
+# Routers
+from backend.routers import (
+    user_router, streak_router, telemetry_router,
+    analytics_router, commitment_router,
 )
 
-# Initialize the database tables
+# Create all tables on startup (use Alembic for schema migrations in production)
 try:
-    User.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    print("[Velora] Database tables verified/created.")
 except Exception as e:
-    print("DB connection failed:", e)
+    print(f"[Velora] DB init warning: {e}")
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
-# --- SECURITY DEPENDENCY ---
-# This tells FastAPI where the frontend will send login credentials
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+# =========================================================
+# BACKEND_URL for use in templates
+# =========================================================
+BACKEND_URL  = os.getenv("BACKEND_URL",  "http://127.0.0.1:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8501")
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    # 1. The server intercepts the JWT token and attempts to decode it using the SECRET_KEY
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # 2. If the token is mathematically valid, fetch the user from the database
-    user = db.query(User).filter(User.email == email).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
 
-# --- SCHEDULER LOGIC ---
+def _make_unsub_token(email: str) -> str:
+    """Generate a 7-day JWT used as the one-click unsubscribe token in emails."""
+    from datetime import timedelta
+    return create_access_token(data={"sub": email}, expires_delta=timedelta(days=7))
+
+
+# =========================================================
+# SCHEDULER JOBS
+# =========================================================
+
+def _already_sent_today(db: Session, user_id: int) -> bool:
+    """Guard: prevent duplicate daily digests."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date()
+    return db.query(DigestSentLog).filter(
+        DigestSentLog.user_id == user_id,
+        DigestSentLog.sent_date == today,
+    ).first() is not None
+
+
 def run_daily_digest():
-    print("🚀 [SCHEDULER] Starting the automated daily AI Coach pipeline...")
+    """
+    Personalized AI morning digest — fires once per day per user.
+    Deduplication guard prevents re-sending on scheduler restarts.
+    """
+    from datetime import datetime, timezone
+    print("[Velora] Starting daily AI digest pipeline...")
     db = SessionLocal()
     try:
-        users = db.query(User).all()
+        users = db.query(User).filter(User.is_subscribed == True).all()
+        sent = 0
+        skipped = 0
+
         for user in users:
-            print(f"🧠 Generating custom advice for {user.name}...")
-            
-            # 1. Ask Gemini to generate the custom JSON
-            ai_advice = generate_daily_digest(user.name, user.interests)
-            
-            # 🚨 THE LOUD DEBUGGER
-            print(f"🚨 DEBUG TYPE: {type(ai_advice)}")
-            
-            # 🛡️ THE ARMOR PLATING: If it's a string, force it to be a dictionary!
-            if isinstance(ai_advice, str):
-                import json
-                try:
-                    print("⚠️ WARNING: It was a string! Converting to dictionary now...")
-                    ai_advice = json.loads(ai_advice)
-                except:
-                    print("❌ ERROR: String was corrupted. Using safe fallback dictionary.")
-                    ai_advice = {
-                        "tip": "Take a 5-minute walk away from your keyboard.",
-                        "habit_reminder": "Spend 10 minutes reviewing your core goals today.",
-                        "quote": "Consistency is what transforms average into excellence.",
-                        "author": "System Coach"
-                    }
-                    
-            # 2. Format it into a beautiful HTML email
-            html_content = f"""
-            <html>
-                <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
-                    <h2 style="color: #2c3e50;">Good Morning, {user.name}! ☕</h2>
-                    <p>Here is your daily personalized coaching to help you master: <strong>{user.interests}</strong></p>
-                    
-                    <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #3498db; margin: 20px 0;">
-                        <h3 style="margin-top: 0; color: #2980b9;">💡 Today's Technical Tip</h3>
-                        <p>{ai_advice.get('tip', 'Keep pushing forward.')}</p>
-                    </div>
-                    
-                    <div style="background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0;">
-                        <h3 style="margin-top: 0; color: #856404;">🎯 Daily Micro-Habit</h3>
-                        <p>{ai_advice.get('habit_reminder', 'Stay consistent.')}</p>
-                    </div>
-                    
-                    <hr style="border: 0; border-top: 1px solid #eee; margin: 30px 0;">
-                    
-                    <blockquote style="font-style: italic; color: #7f8c8d; font-size: 1.1em; text-align: center;">
-                        "{ai_advice.get('quote', 'Never give up.')}" <br>
-                        <strong>- {ai_advice.get('author', 'Coach')}</strong>
-                    </blockquote>
-                </body>
-            </html>
-            """
-            
-            # 3. Send the email
+            if _already_sent_today(db, user.id):
+                skipped += 1
+                continue
+
             try:
-                # We are directly passing the HTML string to your updated email_service.py
-                send_email(user.email, f"Your Daily AI Coach: {user.interests}", html_content)
-                print(f"✅ Email successfully sent to {user.email}")
-            except Exception as email_err:
-                print(f"❌ Could not send email. Error: {email_err}")
-            
+                engine_instance = PersonalizedDigestEngine(db, user)
+                ai_advice = engine_instance.generate_digest()
+
+                if isinstance(ai_advice, str):
+                    try:
+                        ai_advice = json.loads(ai_advice)
+                    except Exception:
+                        ai_advice = engine_instance._fallback_digest()
+
+                html_content = _build_digest_html(ai_advice, user)
+                subject = ai_advice.get("subject", "Your Morning Brief — Velora")
+
+                send_email(user.email, subject, html_content)
+
+                # Record so we never double-send
+                db.add(DigestSentLog(
+                    user_id=user.id,
+                    sent_date=datetime.now(timezone.utc).date(),
+                ))
+                db.commit()
+                sent += 1
+                print(f"[Velora] Digest sent to {user.email}")
+
+            except Exception as e:
+                print(f"[Velora] Digest failed for {user.email}: {e}")
+
+        print(f"[Velora] Daily digest complete — sent: {sent}, skipped (already sent): {skipped}")
+
     except Exception as e:
-        print(f"❌ Scheduler Error: {e}")
+        print(f"[Velora] Scheduler error: {e}")
     finally:
         db.close()
 
-# Start the background job when the server starts
+
+def _build_digest_html(ai_advice: dict, user) -> str:
+    """Build the branded daily digest HTML email — light theme, matches weekly email."""
+    first_name = user.name.split()[0]
+
+    checkin_base    = f"{BACKEND_URL}/analytics/email-checkin?user_id={user.id}"
+    habit_url       = f"{BACKEND_URL}/streaks/email-complete?user_id={user.id}"
+    plan_url        = f"{FRONTEND_URL}/?tab=Daily+Protocol"
+    unsubscribe_url = f"{BACKEND_URL}/users/unsubscribe?token={_make_unsub_token(user.email)}"
+
+    return f"""<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>Your Morning Brief — Velora</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f8;
+             font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+
+<table width="100%" border="0" cellpadding="0" cellspacing="0"
+       style="background:#f4f4f8;padding:32px 0;">
+  <tr><td align="center" style="padding:0 16px;">
+
+  <table width="100%" border="0" cellpadding="0" cellspacing="0"
+         style="max-width:560px;background:#ffffff;border-radius:14px;
+                overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.07);">
+
+    <!-- HEADER -->
+    <tr>
+      <td style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
+                  padding:28px 36px 24px;">
+        <p style="margin:0 0 6px;color:#a78bfa;font-size:11px;font-weight:700;
+                   letter-spacing:2.5px;text-transform:uppercase;
+                   font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">Velora</p>
+        <p style="margin:0;color:#e5e7eb;font-size:13px;
+                   font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+            Your Morning Brief
+        </p>
+      </td>
+    </tr>
+
+    <!-- BODY -->
+    <tr>
+      <td style="padding:32px 36px;background:#ffffff;
+                  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+
+        <!-- Greeting -->
+        <p style="color:#1a1a2e;font-size:21px;font-weight:700;
+                    margin:0 0 20px;line-height:1.4;
+                    font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+          {ai_advice.get('greeting', f'Good morning, {first_name}.')}
+        </p>
+
+        <!-- Pillar 1: What happened -->
+        <p style="font-size:15px;color:#374151;line-height:1.9;margin:0 0 18px;">
+          {ai_advice.get('what_happened', '')}
+        </p>
+
+        <!-- Pillar 2+3: Pattern + Meaning -->
+        <p style="font-size:15px;color:#374151;line-height:1.9;margin:0 0 22px;">
+          {ai_advice.get('pattern_and_meaning', '')}
+        </p>
+
+        <!-- Pillar 4: Recommendation -->
+        <div style="border-left:4px solid #7c3aed;padding:14px 18px;
+                    background:#f5f3ff;border-radius:0 8px 8px 0;margin-bottom:22px;">
+          <p style="margin:0 0 6px;color:#7c3aed;font-size:10px;font-weight:700;
+                     letter-spacing:1.5px;text-transform:uppercase;">One Thing For Today</p>
+          <p style="margin:0;color:#1a1a2e;font-size:15px;line-height:1.7;">
+            {ai_advice.get('recommendation', 'Pick the smallest possible first step and start there.')}
+          </p>
+        </div>
+
+        <!-- Pillar 5: Encouragement -->
+        <p style="font-size:15px;color:#374151;line-height:1.9;margin:0 0 24px;">
+          {ai_advice.get('encouragement', '')}
+        </p>
+
+        <!-- Quote -->
+        <div style="border-top:1px solid #f3f4f6;padding-top:20px;text-align:center;">
+          <p style="font-style:italic;color:#6b7280;font-size:14px;
+                     line-height:1.7;margin:0 0 6px;">
+            &ldquo;{ai_advice.get('quote', 'The first step does not have to be impressive. It just has to happen.')}&rdquo;
+          </p>
+          <p style="margin:0;color:#9ca3af;font-size:12px;font-weight:600;">
+            &mdash; {ai_advice.get('author', 'Velora')}
+          </p>
+        </div>
+
+      </td>
+    </tr>
+
+    <!-- HABIT BUTTON -->
+    <tr>
+      <td style="padding:20px 36px 0;text-align:center;background:#ffffff;
+                  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+        <a href="{habit_url}"
+           style="display:inline-block;background:#059669;color:#ffffff;
+                  text-decoration:none;font-size:15px;font-weight:700;
+                  padding:14px 28px;border-radius:50px;">
+          ✅ I completed my core habit
+        </a>
+        <p style="margin:8px 0 0;font-size:11px;color:#9ca3af;">
+          Tap to log your habit and keep your streak alive
+        </p>
+      </td>
+    </tr>
+
+    <!-- PLAN BUTTON -->
+    <tr>
+      <td style="padding:12px 36px 0;text-align:center;background:#ffffff;
+                  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+        <a href="{plan_url}"
+           style="display:inline-block;background:#f5f3ff;color:#7c3aed;
+                  text-decoration:none;font-size:14px;font-weight:600;
+                  padding:12px 28px;border-radius:50px;border:1px solid #ddd6fe;">
+          📋 Plan Today's Execution Blocks
+        </a>
+        <p style="margin:6px 0 0;font-size:11px;color:#9ca3af;">
+          Open Velora and lock in your focus windows for today
+        </p>
+      </td>
+    </tr>
+
+    <!-- ENERGY CHECK-IN -->
+    <tr>
+      <td style="background:#f9fafb;padding:22px 36px;
+                  border-top:1px solid #f3f4f6;margin-top:20px;
+                  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;
+                  text-align:center;">
+        <p style="margin:0 0 12px;color:#6b7280;font-size:11px;font-weight:700;
+                   letter-spacing:1.5px;text-transform:uppercase;">
+          How's your energy today?
+        </p>
+        <table width="100%" border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center">
+              <a href="{checkin_base}&energy=3&focus=3"
+                 style="text-decoration:none;display:inline-block;
+                        padding:12px 20px;background:#f3f4f6;
+                        border:1px solid #e5e7eb;border-radius:50px;
+                        font-size:20px;margin:0 6px;">😴</a>
+              <a href="{checkin_base}&energy=6&focus=6"
+                 style="text-decoration:none;display:inline-block;
+                        padding:12px 20px;background:#f3f4f6;
+                        border:1px solid #e5e7eb;border-radius:50px;
+                        font-size:20px;margin:0 6px;">😐</a>
+              <a href="{checkin_base}&energy=9&focus=9"
+                 style="text-decoration:none;display:inline-block;
+                        padding:12px 20px;background:#f3f4f6;
+                        border:1px solid #e5e7eb;border-radius:50px;
+                        font-size:20px;margin:0 6px;">⚡</a>
+            </td>
+          </tr>
+        </table>
+        <p style="margin:10px 0 0;font-size:12px;color:#9ca3af;">
+          Tap once — it only takes a second
+        </p>
+      </td>
+    </tr>
+
+    <!-- FOOTER -->
+    <tr>
+      <td style="padding:16px 36px;background:#f9fafb;
+                  border-top:1px solid #f3f4f6;text-align:center;
+                  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+        <p style="margin:0 0 4px;font-size:11px;color:#9ca3af;">
+          Velora · Execution Intelligence Platform
+        </p>
+        <p style="margin:0;font-size:11px;">
+          <a href="{unsubscribe_url}"
+             style="color:#9ca3af;text-decoration:underline;">Unsubscribe</a>
+        </p>
+      </td>
+    </tr>
+
+  </table>
+  </td></tr>
+</table>
+</body>
+</html>"""
+
+
+def run_weekly_analytics():
+    print("[Velora] Starting weekly analytics email pipeline...")
+    db = SessionLocal()
+    try:
+        result = send_all_weekly_reports(db)
+        print(f"[Velora] Weekly report result: {result}")
+    except Exception as e:
+        print(f"[Velora] Weekly scheduler error: {e}")
+    finally:
+        db.close()
+
+
+def run_commitment_cleanup_job():
+    print("[Velora] Running commitment auto-finalize job...")
+    db = SessionLocal()
+    try:
+        auto_finalize_expired_commitments(db)
+    except Exception as e:
+        print(f"[Velora] Cleanup job error: {e}")
+    finally:
+        db.close()
+
+
+# =========================================================
+# LIFESPAN — scheduler setup
+# =========================================================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler = BackgroundScheduler()
-    # Currently set to run every 2 minutes for testing. 
-    # Change 'minutes=2' to 'hours=24' when you are done testing.
-    scheduler.add_job(run_daily_digest, 'interval', minutes=2)
+    print("[Velora] Starting scheduler...")
+    scheduler = BackgroundScheduler(timezone="UTC")
+
+    # Daily digest — 7:00 AM IST = 01:30 UTC
+    digest_hour   = int(os.getenv("DIGEST_HOUR_UTC",   "1"))
+    digest_minute = int(os.getenv("DIGEST_MINUTE_UTC", "30"))
+    scheduler.add_job(
+        run_daily_digest,
+        CronTrigger(hour=digest_hour, minute=digest_minute),
+        id="daily_digest",
+        replace_existing=True,
+    )
+
+    # Weekly report — Sunday 6:00 PM IST = Sunday 12:30 UTC
+    scheduler.add_job(
+        run_weekly_analytics,
+        CronTrigger(day_of_week="sun", hour=12, minute=30),
+        id="weekly_analytics",
+        replace_existing=True,
+    )
+
+    # Commitment cleanup — every 30 minutes
+    scheduler.add_job(
+        run_commitment_cleanup_job,
+        "interval",
+        minutes=30,
+        id="commitment_cleanup",
+        replace_existing=True,
+    )
+
     scheduler.start()
     yield
+    print("[Velora] Shutting down scheduler...")
     scheduler.shutdown()
 
-app = FastAPI(lifespan=lifespan)
 
-# --- LOGIN ENDPOINT ---
+# =========================================================
+# APP SETUP
+# =========================================================
+
+app = FastAPI(
+    title="Velora API",
+    description="Execution Intelligence Platform — Backend API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS — restricted to the deployed frontend URL in production
+_allowed_origins = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501").split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Routers
+app.include_router(user_router.router)
+app.include_router(streak_router.router)
+app.include_router(telemetry_router.router)
+app.include_router(analytics_router.router)
+app.include_router(commitment_router.router)
+
+
+# =========================================================
+# AUTH ENDPOINTS
+# =========================================================
+
 class LoginRequest(BaseModel):
     email: str
     password: str
 
-@app.post("/login")
+
+@app.post("/login", tags=["Auth"])
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == req.email).first()
     if not user or not verify_password(req.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    
+        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+
     access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer", "user": {"name": user.name, "interests": user.interests, "email": user.email}}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id":           user.id,
+            "name":         user.name,
+            "email":        user.email,
+            "focus_areas":  user.focus_areas,
+            "primary_goal": user.primary_goal,
+            "is_admin":     user.is_admin,
+            "timezone":     user.timezone,
+        },
+    }
 
-# --- STANDARD ENDPOINTS ---
-@app.get("/")
-def home():
-    return {"message": "SmartBrief AI Coach running"}
 
-@app.post("/users/", response_model=UserResponse)
+# =========================================================
+# REGISTRATION
+# =========================================================
+
+from backend.schemas.user_schema import UserCreate, UserResponse
+
+
+@app.post("/users/", response_model=UserResponse, tags=["Auth"])
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_pw = get_password_hash(user.password)
-    
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered.")
+
     new_user = User(
-        name=user.name, 
-        email=user.email, 
-        interests=user.interests, 
-        hashed_password=hashed_pw
+        name=user.name,
+        email=user.email,
+        hashed_password=get_password_hash(user.password),
+        primary_goal=user.primary_goal,
+        focus_areas=user.focus_areas,
+        struggles=user.struggles,
+        habits=user.habits,
+        preferred_tone=user.preferred_tone,
+        daily_time_minutes=user.daily_time_minutes,
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
     return new_user
 
-# --- PROTECTED ENDPOINTS ---
-@app.put("/users/me", response_model=UserResponse)
-def update_user(user_update: UserUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    current_user.interests = user_update.interests
-    db.commit()
-    db.refresh(current_user)
-    return current_user
 
-@app.delete("/users/me")
-def delete_user(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+# =========================================================
+# ACCOUNT DELETION
+# =========================================================
+
+@app.delete("/users/me", tags=["Auth"])
+def delete_account(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     db.delete(current_user)
     db.commit()
-    return {"message": "User successfully unsubscribed"}
+    return {"message": "Account deleted."}
 
-# --- AI COACH ENDPOINT ---
-@app.get("/generate-digest")
-def get_daily_digest(goals: str, name: str = "User"):
-    digest = generate_daily_digest(name, goals)
-    if not digest:
-        raise HTTPException(status_code=500, detail="Failed to generate AI digest")
-    return digest
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+
+@app.get("/", tags=["Health"])
+def health_check():
+    return {
+        "status": "operational",
+        "product": "Velora",
+        "version": "1.0.0",
+    }
+
+
+# =========================================================
+# MANUAL DIGEST TRIGGER (dev/admin testbed)
+# =========================================================
+
+@app.get("/generate-digest", tags=["Dev"])
+def get_daily_digest_testbed(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Manually trigger and preview the AI digest for the authenticated user."""
+    try:
+        engine_instance = PersonalizedDigestEngine(db, current_user)
+        digest = engine_instance.generate_digest()
+        if not digest:
+            raise HTTPException(status_code=500, detail="Digest generation returned empty.")
+        return digest
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Engine error: {str(err)}")
+
+
+@app.get("/preview-digest-html", tags=["Dev"])
+def preview_digest_html(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the exact HTML that will be sent in the daily email.
+    Used by the Email Preview tab — single source of truth.
+    """
+    from fastapi.responses import HTMLResponse
+    try:
+        engine_instance = PersonalizedDigestEngine(db, current_user)
+        digest = engine_instance.generate_digest()
+        if not digest:
+            raise HTTPException(status_code=500, detail="Digest generation returned empty.")
+        html = _build_digest_html(digest, current_user)
+        return HTMLResponse(content=html)
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Engine error: {str(err)}")
+
+
+@app.get("/preview-weekly-html", tags=["Dev"])
+def preview_weekly_html(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the exact HTML that will be sent in the weekly Sunday email.
+    Used by the Email Preview tab — single source of truth.
+    """
+    from fastapi.responses import HTMLResponse
+    from backend.services.analytics_service import get_weekly_analytics
+    from backend.services.commitment_service import compute_dashboard_stats
+    from backend.services.auth_service import create_access_token
+    from backend.services.email_template_service import generate_weekly_analytics_html
+    from backend.services.scheduler_service import _get_latest_reflection
+    from datetime import timedelta
+    try:
+        analytics  = get_weekly_analytics(db, current_user.id)
+        reflection = _get_latest_reflection(db, current_user.id)
+        token = create_access_token(
+            data={"sub": current_user.email},
+            expires_delta=timedelta(days=7),
+        )
+        try:
+            dash_stats = compute_dashboard_stats(db, current_user.id)
+            cw = dash_stats.current_week.model_dump()
+        except Exception:
+            cw = None
+        html = generate_weekly_analytics_html(
+            user_name        = current_user.name,
+            analytics        = analytics,
+            user_token       = token,
+            commitment_stats = cw,
+            reflection       = reflection,
+            user_goal        = current_user.primary_goal or "",
+        )
+        return HTMLResponse(content=html)
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Engine error: {str(err)}")

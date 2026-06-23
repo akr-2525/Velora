@@ -6,6 +6,11 @@ import os
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not set. "
+        "Add it to your .env file before starting the server."
+    )
 
 engine = create_engine(
     DATABASE_URL,

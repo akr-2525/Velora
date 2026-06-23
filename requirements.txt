@@ -1,19 +1,38 @@
-fastapi
-uvicorn
-requests
-python-dotenv
-transformers
-torch
-sentencepiece
-numpy
-streamlit
-sqlalchemy 
-psycopg2-binary
-pydantic
-email-validator
-feedparser
-apscheduler
-passlib[bcrypt]
-bcrypt<4.0.0
-PyJWT
-google-generativeai
+# Velora — pinned production dependencies
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# Database
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+
+# Data validation
+pydantic[email]==2.7.1
+
+# Auth & Security
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+PyJWT==2.8.0
+
+# AI
+google-genai==2.9.0
+
+# Email
+# (uses stdlib smtplib — no extra package needed)
+
+# Scheduler
+apscheduler==3.10.4
+
+# Environment
+python-dotenv==1.0.1
+
+# Frontend
+streamlit==1.35.0
+extra-streamlit-components==0.1.81
+plotly==5.22.0
+pandas==2.2.2
+requests==2.32.2
+
+# Regression line in scatter plot (energy-execution correlation)
+statsmodels==0.14.2

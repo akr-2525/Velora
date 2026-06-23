@@ -1,8 +1,14 @@
 # Environments
 .env
+.env.example
+
 venv/
 env/
 
 # Python cache
 __pycache__/
 *.pyc
+
+# Dev/test data scripts — do not deploy to production
+backend/seed_dev_data.py
+backend/inject_test_data.py
