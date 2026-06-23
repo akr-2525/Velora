@@ -351,16 +351,8 @@ def render_auth():
                         st.session_state["token"]   = d["access_token"]
                         st.session_state["user"]    = d["user"]
                         st.session_state["user_tz"] = d["user"].get("timezone", "UTC")
-                        # Persist token in cookie — survives refresh and browser close
-                        # 30-day expiry matches the JWT lifetime
-                        from datetime import timedelta
-                        _cookie_mgr.set(
-                            "velora_token",
-                            d["access_token"],
-                            expires_at=datetime.datetime.now() + timedelta(days=30),
-                            same_site="lax",
-                            key="set_velora_token",
-                        )
+                        # Persist token in URL — survives refresh reliably on Streamlit Cloud
+                        st.query_params["_auth"] = d["access_token"]
                         st.rerun()
                     else:
                         st.error("Wrong email or password.")
@@ -1694,30 +1686,33 @@ def render_reflection_deeplink():
 
 query_params = st.query_params
 
-# ── Persistent login via cookie ───────────────────────────────────────────────
-# self.cookies is populated at CookieManager.__init__ time from the browser
-# request headers — so get() works immediately on every render pass.
+# ── Persistent login via URL token ────────────────────────────────────────────
+# Most reliable approach for Streamlit Cloud:
+# After login, store token as a query param (?_auth=TOKEN).
+# On every page load/refresh, Python reads it directly from the URL.
+# No JS, no cookies, no async components — works 100% reliably.
 
 if "token" not in st.session_state:
-    _stored = _cookie_mgr.get("velora_token")
-    if _stored:
+    _url_token = query_params.get("_auth", "")
+    if _url_token:
         try:
             _test = requests.get(
                 API_URL + "/users/me",
-                headers={"Authorization": "Bearer " + _stored},
+                headers={"Authorization": "Bearer " + _url_token},
                 timeout=5,
             )
             if _test.status_code == 200:
                 _u = _test.json()
-                st.session_state["token"]   = _stored
+                st.session_state["token"]   = _url_token
                 st.session_state["user"]    = _u
                 st.session_state["user_tz"] = _u.get("timezone", "UTC")
                 st.rerun()
             else:
-                # Token expired — delete cookie, fall through to login
-                _cookie_mgr.delete("velora_token", key="del_expired")
+                # Token expired — remove it from URL
+                _clean = {k: v for k, v in query_params.items() if k != "_auth"}
+                st.query_params.from_dict(_clean)
         except Exception:
-            pass  # backend unreachable — show login
+            pass
 
 # Email deep-link: weekly reflection (any day — bypasses Sunday lock)
 if query_params.get("view") == "reflection" and "token" in query_params:
@@ -1766,7 +1761,7 @@ else:
                 st.error("Could not update streak.")
         st.divider()
         if st.button("Sign Out", width="stretch"):
-            _cookie_mgr.delete("velora_token", key="del_signout")
+            st.query_params.clear()
             st.session_state.clear()
             st.rerun()
 
