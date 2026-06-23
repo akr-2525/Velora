@@ -1,13 +1,13 @@
 # Velora Backend — Render deployment
-fastapi>=0.111.0,<0.115.0
-uvicorn[standard]>=0.29.0,<0.35.0
-sqlalchemy>=2.0.30,<2.1.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+sqlalchemy>=2.0.30
 psycopg2-binary>=2.9.9
-pydantic[email]>=2.7.0,<2.10.0
+pydantic[email]>=2.12.5
 passlib[bcrypt]>=1.7.4
-bcrypt>=3.2.2,<5.0.0
-PyJWT>=2.8.0,<3.0.0
+bcrypt>=4.0.0
+PyJWT>=2.8.0
 google-genai>=2.9.0
-apscheduler>=3.10.4,<4.0.0
+apscheduler>=3.10.4
 python-dotenv>=1.0.1
 requests>=2.32.0
