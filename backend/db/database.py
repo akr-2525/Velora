@@ -12,6 +12,10 @@ if not DATABASE_URL:
         "Add it to your .env file before starting the server."
     )
 
+# SQLAlchemy requires postgresql:// not postgres:// (Neon/Heroku give postgres://)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True
