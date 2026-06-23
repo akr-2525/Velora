@@ -341,11 +341,12 @@ def render_auth():
                                       json={"email": em, "password": pw})
                     if r.status_code == 200:
                         d = r.json()
-                        st.session_state["token"]   = d["access_token"]
-                        st.session_state["user"]    = d["user"]
-                        st.session_state["user_tz"] = d["user"].get("timezone", "UTC")
-                        # Persist token in URL — survives refresh reliably on Streamlit Cloud
-                        st.query_params["_auth"] = d["access_token"]
+                        st.session_state["token"]       = d["access_token"]
+                        st.session_state["session_key"] = d["session_key"]
+                        st.session_state["user"]        = d["user"]
+                        st.session_state["user_tz"]     = d["user"].get("timezone", "UTC")
+                        # Store short session key in URL — safe (random ID, not the JWT)
+                        st.query_params["_s"] = d["session_key"]
                         st.rerun()
                     else:
                         st.error("Wrong email or password.")
@@ -1686,23 +1687,23 @@ query_params = st.query_params
 # No JS, no cookies, no async components — works 100% reliably.
 
 if "token" not in st.session_state:
-    _url_token = query_params.get("_auth", "")
-    if _url_token:
+    _session_key = query_params.get("_s", "")
+    if _session_key:
         try:
             _test = requests.get(
-                API_URL + "/users/me",
-                headers={"Authorization": "Bearer " + _url_token},
+                API_URL + "/session/" + _session_key,
                 timeout=5,
             )
             if _test.status_code == 200:
-                _u = _test.json()
-                st.session_state["token"]   = _url_token
-                st.session_state["user"]    = _u
-                st.session_state["user_tz"] = _u.get("timezone", "UTC")
+                _d = _test.json()
+                st.session_state["token"]       = _d["access_token"]
+                st.session_state["session_key"] = _session_key
+                st.session_state["user"]        = _d["user"]
+                st.session_state["user_tz"]     = _d["user"].get("timezone", "UTC")
                 st.rerun()
             else:
-                # Token expired — remove it from URL
-                _clean = {k: v for k, v in query_params.items() if k != "_auth"}
+                # Session expired — remove key from URL
+                _clean = {k: v for k, v in query_params.items() if k != "_s"}
                 st.query_params.from_dict(_clean)
         except Exception:
             pass
@@ -1754,6 +1755,12 @@ else:
                 st.error("Could not update streak.")
         st.divider()
         if st.button("Sign Out", width="stretch"):
+            _sk = st.session_state.get("session_key", "")
+            if _sk:
+                try:
+                    requests.delete(API_URL + "/session/" + _sk, timeout=3)
+                except Exception:
+                    pass
             st.query_params.clear()
             st.session_state.clear()
             st.rerun()

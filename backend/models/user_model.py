@@ -205,3 +205,18 @@ class DailyPriority(Base):
     date = Column(Date, nullable=False)
     priority_text = Column(String, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ==========================================
+# 11. USER SESSIONS (for URL-safe persistent login)
+# Short opaque session_key stored in URL — maps to JWT in DB
+# ==========================================
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    session_key = Column(String, unique=True, index=True, nullable=False)  # short random ID in URL
+    jwt_token   = Column(String, nullable=False)                            # actual JWT stored server-side
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expires_at  = Column(DateTime, nullable=False)

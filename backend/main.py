@@ -6,6 +6,7 @@ FastAPI application entry point.
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,7 @@ from pydantic import BaseModel
 
 # Database
 from backend.db.database import engine, SessionLocal
-from backend.models.user_model import Base, User, DigestSentLog
+from backend.models.user_model import Base, User, DigestSentLog, UserSession
 from backend.models.commitment_model import Commitment
 
 # Services
@@ -423,8 +424,33 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
     access_token = create_access_token(data={"sub": user.email})
+
+    # Create a short opaque session key — this goes in the URL, not the JWT
+    import secrets as _secrets
+    from datetime import timedelta as _td
+    session_key = _secrets.token_urlsafe(16)  # 22-char URL-safe random string
+    expires = datetime.now(timezone.utc) + _td(days=30)
+    db.add(UserSession(
+        user_id=user.id,
+        session_key=session_key,
+        jwt_token=access_token,
+        expires_at=expires,
+    ))
+    # Clean up old sessions for this user (keep last 5 only)
+    old_sessions = (
+        db.query(UserSession)
+        .filter(UserSession.user_id == user.id)
+        .order_by(UserSession.created_at.desc())
+        .offset(5)
+        .all()
+    )
+    for s in old_sessions:
+        db.delete(s)
+    db.commit()
+
     return {
         "access_token": access_token,
+        "session_key":  session_key,   # short opaque key — safe to put in URL
         "token_type": "bearer",
         "user": {
             "id":           user.id,
@@ -436,6 +462,57 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             "timezone":     user.timezone,
         },
     }
+
+
+@app.get("/session/{session_key}", tags=["Auth"])
+def resolve_session(session_key: str, db: Session = Depends(get_db)):
+    """
+    Resolve a short session key back to a JWT and user profile.
+    Called on every page refresh — replaces cookie/localStorage approach.
+    """
+    from datetime import datetime, timezone
+    sess = db.query(UserSession).filter(
+        UserSession.session_key == session_key
+    ).first()
+
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if sess.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        db.delete(sess)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Session expired.")
+
+    user = db.query(User).filter(User.id == sess.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    return {
+        "access_token": sess.jwt_token,
+        "session_key":  session_key,
+        "token_type": "bearer",
+        "user": {
+            "id":           user.id,
+            "name":         user.name,
+            "email":        user.email,
+            "focus_areas":  user.focus_areas,
+            "primary_goal": user.primary_goal,
+            "is_admin":     user.is_admin,
+            "timezone":     user.timezone,
+        },
+    }
+
+
+@app.delete("/session/{session_key}", tags=["Auth"])
+def delete_session(session_key: str, db: Session = Depends(get_db)):
+    """Sign out — delete the session from DB so the key becomes invalid."""
+    sess = db.query(UserSession).filter(
+        UserSession.session_key == session_key
+    ).first()
+    if sess:
+        db.delete(sess)
+        db.commit()
+    return {"message": "Signed out."}
 
 
 # =========================================================
