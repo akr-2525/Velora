@@ -86,13 +86,6 @@ TIMEZONE_OPTIONS = [
 
 st.set_page_config(page_title="Velora", page_icon="zap", layout="wide")
 
-# ── Cookie manager — instantiated right after set_page_config ─────────────────
-# get_all() is called in __init__ so self.cookies is populated immediately.
-# On first render after a fresh page load it returns whatever cookies the
-# browser sends with the request — including velora_token if previously set.
-import extra_streamlit_components as stx
-_cookie_mgr = stx.CookieManager(key="velora_cm")
-
 # ── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>

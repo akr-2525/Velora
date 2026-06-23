@@ -1,6 +1,5 @@
 # Velora Frontend — Streamlit Cloud deployment
 streamlit>=1.40.1
-extra-streamlit-components>=0.1.81
 plotly>=5.22.0
 pandas>=2.2.2
 requests>=2.32.0
