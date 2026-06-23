@@ -1680,11 +1680,16 @@ def render_reflection_deeplink():
 
 query_params = st.query_params
 
-# ── Persistent login via URL token ────────────────────────────────────────────
-# Most reliable approach for Streamlit Cloud:
-# After login, store token as a query param (?_auth=TOKEN).
-# On every page load/refresh, Python reads it directly from the URL.
-# No JS, no cookies, no async components — works 100% reliably.
+# ── Persistent login via session key ─────────────────────────────────────────
+# Login stores a short opaque session key (?_s=xxxx) in URL.
+# On refresh, Python calls /session/{key} to restore JWT from DB.
+# JWT never appears in URL — only the random session key does.
+
+# Clean up any old _auth params from previous deploy
+if "_auth" in query_params:
+    _clean = {k: v for k, v in query_params.items() if k not in ("_auth",)}
+    st.query_params.from_dict(_clean)
+    st.rerun()
 
 if "token" not in st.session_state:
     _session_key = query_params.get("_s", "")
