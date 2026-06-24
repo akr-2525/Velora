@@ -601,6 +601,29 @@ def get_daily_digest_testbed(
         raise HTTPException(status_code=500, detail=f"Engine error: {str(err)}")
 
 
+@app.post("/send-test-email", tags=["Dev"])
+def send_test_email(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Send the actual daily email to the current user RIGHT NOW.
+    Use this to test email delivery without waiting for the scheduler.
+    """
+    try:
+        engine_instance = PersonalizedDigestEngine(db, current_user)
+        ai_advice = engine_instance.generate_digest()
+        if isinstance(ai_advice, str):
+            import json as _json
+            ai_advice = _json.loads(ai_advice)
+        html_content = _build_digest_html(ai_advice, current_user)
+        subject = ai_advice.get("subject", "Your Morning Brief — Velora")
+        send_email(current_user.email, subject, html_content)
+        return {"message": f"Test email sent to {current_user.email}", "subject": subject}
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Email error: {str(err)}")
+
+
 @app.get("/preview-digest-html", tags=["Dev"])
 def preview_digest_html(
     current_user: User = Depends(get_current_user),
