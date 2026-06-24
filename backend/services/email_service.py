@@ -1,40 +1,47 @@
 """
-Unified email sending utility for Velora.
-Uses Gmail SMTP SSL (port 465) consistently.
-All outbound email goes through this single function.
+Velora email sending — uses Resend API (HTTP, not SMTP).
+Render free tier blocks outbound SMTP ports, so we use Resend's HTTP API instead.
+Free tier: 3,000 emails/month — plenty for Velora.
 """
 
-import smtplib
 import os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 465
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+SENDER_EMAIL   = os.getenv("SENDER_EMAIL", "onboarding@resend.dev")
+SENDER_NAME    = os.getenv("SENDER_NAME", "Velora")
 
 
 def send_email(to_email: str, subject: str, html_content: str) -> None:
     """
-    Send a single HTML email via Gmail SMTP SSL.
-    Raises on failure so callers can handle or log the error.
+    Send a single HTML email via Resend HTTP API.
+    No SMTP ports needed — works on Render free tier.
     """
-    if not SENDER_EMAIL or not SENDER_PASSWORD:
+    if not RESEND_API_KEY:
         raise RuntimeError(
-            "SENDER_EMAIL or SENDER_PASSWORD env vars are not set."
+            "RESEND_API_KEY environment variable is not set. "
+            "Sign up at resend.com and add the key to Render env vars."
         )
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"Velora AI <{SENDER_EMAIL}>"
-    msg["To"] = to_email
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from":    f"{SENDER_NAME} <{SENDER_EMAIL}>",
+            "to":      [to_email],
+            "subject": subject,
+            "html":    html_content,
+        },
+        timeout=15,
+    )
 
-    msg.attach(MIMEText(html_content, "html"))
-
-    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
-        smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
-        smtp.send_message(msg)
+    if response.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Resend API error {response.status_code}: {response.text}"
+        )
