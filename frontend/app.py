@@ -385,7 +385,8 @@ def render_auth():
                             "timezone": tz,
                         })
                         if r.status_code == 200:
-                            st.success("Account created. Sign in above.")
+                            st.success("Account created! Sign in above.")
+                            st.info("📬 Your first morning email arrives at 7 AM. Check your **Promotions** tab in Gmail — then move it to Primary so future emails land there directly.")
                         else:
                             try:    st.error(r.json().get("detail", r.text))
                             except: st.error(r.text)
