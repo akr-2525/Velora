@@ -571,6 +571,12 @@ def health_check():
     }
 
 
+@app.get("/ping", tags=["Health"])
+def ping():
+    """Lightweight keep-alive endpoint for cron jobs."""
+    return {"ok": True}
+
+
 # =========================================================
 # MANUAL DIGEST TRIGGER (dev/admin testbed)
 # =========================================================
