@@ -10,7 +10,7 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping backend
+      - name: Ping Velora backend
         run: |
-          curl -s https://velora-backend-lwj8.onrender.com/ping
-          echo "Pinged at $(date)"
+          curl -f -s https://velora-backend-lwj8.onrender.com/ping
+          echo "Pinged successfully at $(date -u)"
