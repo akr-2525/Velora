@@ -1,0 +1,16 @@
+name: Keep Velora Backend Alive
+
+on:
+  schedule:
+    # Ping every 10 minutes to prevent Render free tier sleep
+    - cron: '*/10 * * * *'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend
+        run: |
+          curl -s https://velora-backend-lwj8.onrender.com/ping
+          echo "Pinged at $(date)"
