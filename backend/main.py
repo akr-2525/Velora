@@ -343,7 +343,6 @@ async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler(timezone="UTC")
 
     # Daily digest — 7:00 AM IST = 01:30 UTC
-    # misfire_grace_time: if server was asleep at fire time, run within 2 hours of waking
     digest_hour   = int(os.getenv("DIGEST_HOUR_UTC",   "1"))
     digest_minute = int(os.getenv("DIGEST_MINUTE_UTC", "30"))
     scheduler.add_job(
@@ -351,7 +350,7 @@ async def lifespan(app: FastAPI):
         CronTrigger(hour=digest_hour, minute=digest_minute),
         id="daily_digest",
         replace_existing=True,
-        misfire_grace_time=7200,  # 2 hours — fires on wakeup if missed within 2h
+        misfire_grace_time=7200,
     )
 
     # Weekly report — Sunday 6:00 PM IST = Sunday 12:30 UTC
@@ -374,6 +373,28 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.start()
+
+    # ── Startup catch-up: if server was sleeping at send time, send now ──────
+    # Check if today's digest window has passed but email wasn't sent yet.
+    # This fires immediately on cold start after the cron job wakes the server.
+    import threading as _threading
+    def _startup_catchup():
+        import time as _time
+        _time.sleep(5)  # wait for app to fully initialize
+        now_utc = datetime.now(timezone.utc)
+        scheduled_today = now_utc.replace(
+            hour=digest_hour, minute=digest_minute, second=0, microsecond=0
+        )
+        # Fire if: scheduled time has passed today AND it's within 3 hours of it
+        minutes_since = (now_utc - scheduled_today).total_seconds() / 60
+        if 0 < minutes_since < 180:
+            print(f"[Velora] Startup catch-up: digest window passed {int(minutes_since)} min ago — sending now")
+            run_daily_digest()
+        else:
+            print(f"[Velora] Startup catch-up: no catch-up needed (minutes_since={int(minutes_since)})")
+
+    _threading.Thread(target=_startup_catchup, daemon=True).start()
+
     yield
     print("[Velora] Shutting down scheduler...")
     scheduler.shutdown()
