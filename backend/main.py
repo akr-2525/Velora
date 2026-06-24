@@ -343,6 +343,7 @@ async def lifespan(app: FastAPI):
     scheduler = BackgroundScheduler(timezone="UTC")
 
     # Daily digest — 7:00 AM IST = 01:30 UTC
+    # misfire_grace_time: if server was asleep at fire time, run within 2 hours of waking
     digest_hour   = int(os.getenv("DIGEST_HOUR_UTC",   "1"))
     digest_minute = int(os.getenv("DIGEST_MINUTE_UTC", "30"))
     scheduler.add_job(
@@ -350,6 +351,7 @@ async def lifespan(app: FastAPI):
         CronTrigger(hour=digest_hour, minute=digest_minute),
         id="daily_digest",
         replace_existing=True,
+        misfire_grace_time=7200,  # 2 hours — fires on wakeup if missed within 2h
     )
 
     # Weekly report — Sunday 6:00 PM IST = Sunday 12:30 UTC
@@ -358,6 +360,7 @@ async def lifespan(app: FastAPI):
         CronTrigger(day_of_week="sun", hour=12, minute=30),
         id="weekly_analytics",
         replace_existing=True,
+        misfire_grace_time=7200,
     )
 
     # Commitment cleanup — every 30 minutes
@@ -367,6 +370,7 @@ async def lifespan(app: FastAPI):
         minutes=30,
         id="commitment_cleanup",
         replace_existing=True,
+        misfire_grace_time=1800,
     )
 
     scheduler.start()
