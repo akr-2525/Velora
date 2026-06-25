@@ -188,9 +188,22 @@ Return ONLY valid JSON:
     try:
         if not _client:
             raise RuntimeError("No Gemini client")
-        response = _client.models.generate_content(model=_MODEL, contents=prompt)
-        raw = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw)
+        import time as _time
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = _client.models.generate_content(model=_MODEL, contents=prompt)
+                raw = response.text.replace("```json", "").replace("```", "").strip()
+                return json.loads(raw)
+            except Exception as e:
+                last_error = e
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    wait = (attempt + 1) * 8
+                    print(f"[Velora] Weekly AI 503 attempt {attempt+1}, retry in {wait}s...")
+                    _time.sleep(wait)
+                else:
+                    raise
+        raise last_error
     except Exception as e:
         print(f"[Velora] Weekly AI summary failed: {e}")
         return _fallback_weekly_summary(

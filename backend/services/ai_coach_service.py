@@ -40,14 +40,28 @@ _MODEL  = "gemini-2.5-flash-lite"
 
 
 def _generate(prompt: str) -> str:
-    """Single helper — call Gemini and return raw text."""
+    """Single helper — call Gemini with retry on 503."""
     if not _client:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-    )
-    return response.text
+    import time as _time
+    last_error = None
+    for attempt in range(3):  # try up to 3 times
+        try:
+            response = _client.models.generate_content(
+                model=_MODEL,
+                contents=prompt,
+            )
+            return response.text
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            if "503" in err_str or "UNAVAILABLE" in err_str:
+                wait = (attempt + 1) * 8  # 8s, 16s, 24s
+                print(f"[Velora AI] Gemini 503 on attempt {attempt+1}, retrying in {wait}s...")
+                _time.sleep(wait)
+            else:
+                raise  # non-503 error — don't retry
+    raise last_error
 
 # =========================================================
 # WRITING STYLES
