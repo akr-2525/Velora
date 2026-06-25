@@ -44,8 +44,9 @@ def _generate(prompt: str) -> str:
     if not _client:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
     import time as _time
+    _retry_waits = [8, 30, 60]  # 8s → 30s → 60s
     last_error = None
-    for attempt in range(3):  # try up to 3 times
+    for attempt, wait in enumerate(_retry_waits):
         try:
             response = _client.models.generate_content(
                 model=_MODEL,
@@ -54,9 +55,7 @@ def _generate(prompt: str) -> str:
             return response.text
         except Exception as e:
             last_error = e
-            err_str = str(e)
-            if "503" in err_str or "UNAVAILABLE" in err_str:
-                wait = (attempt + 1) * 8  # 8s, 16s, 24s
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
                 print(f"[Velora AI] Gemini 503 on attempt {attempt+1}, retrying in {wait}s...")
                 _time.sleep(wait)
             else:
