@@ -192,46 +192,8 @@ Velora provides insights such as:
 - Calendar integrations
 - Advanced ML-based behavioral prediction
 
----
 
 
-
-# 🧪 Local Setup
-
-```bash
-# Clone repository
-git clone https://github.com/akr-2525/velora.git
-
-cd velora
-
-# Create virtual environment
-python -m venv venv
-
-# Activate environment
-source venv/bin/activate
-# Windows
-venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment variables
-cp .env.example .env
-
-# Run FastAPI
-uvicorn app.main:app --reload
-
-# Run Streamlit
-streamlit run app.py
-```
-
----
-
-
-
-# 👨‍💻 Author
-
-**AMAN**
 
 
 
